@@ -3,6 +3,7 @@ import { Sparkles, ChevronDown, ChevronUp, AlertCircle, CheckCircle2, Info, Plus
 import type { DataRow, StandardizationPair } from '../types';
 import { getUniqueValues, applyColumnMapping } from '../utils/dataUtils';
 import DataGrid from './DataGrid';
+import { getSupabaseConfig } from '../utils/db';
 
 export type AIProvider = 'groq' | 'openai' | 'anthropic' | 'gemini';
 
@@ -14,6 +15,8 @@ interface StandardizationRule {
   status: 'idle' | 'loading' | 'success' | 'error';
   error: string | null;
   mappings: StandardizationPair[] | null;
+  preset?: string;
+  progressMsg?: string;
 }
 
 interface AIStandardizeModuleProps {
@@ -25,6 +28,153 @@ interface AIStandardizeModuleProps {
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+function parseJsonResponse(text: string): { mappings: StandardizationPair[] } {
+  let parsed: { mappings?: StandardizationPair[] };
+  try {
+    parsed = JSON.parse(text) as { mappings?: StandardizationPair[] };
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error("Could not parse response as JSON");
+    parsed = JSON.parse(match[0]) as { mappings?: StandardizationPair[] };
+  }
+
+  if (!parsed || !parsed.mappings || !Array.isArray(parsed.mappings)) {
+    throw new Error("Invalid response structure: 'mappings' array not found in JSON response");
+  }
+
+  return parsed as { mappings: StandardizationPair[] };
+}
+
+async function callAIDirectly(
+  provider: AIProvider,
+  apiKey: string,
+  columnName: string,
+  instruction: string,
+  uniqueValues: string[],
+  signal?: AbortSignal
+): Promise<{ mappings: StandardizationPair[] }> {
+  const prompt = `You are a data standardization engine. Your task is to map raw, messy values from a dataset column to clean, standardized values.
+
+Column Name: "${columnName}"
+Standardization Rule: ${instruction}
+
+Here are the unique raw values to standardize:
+${uniqueValues.map((v, i) => `${i + 1}. "${v}"`).join("\n")}
+
+Return a JSON object with this exact structure:
+{
+  "mappings": [
+    { "original_value": "<exact original value>", "standardized_value": "<clean standardized value>" },
+    ...
+  ]
+}
+
+Rules:
+- Every input value must appear exactly once in the mappings as "original_value"
+- "original_value" must be EXACTLY the raw value (case-sensitive, character-for-character match)
+- "standardized_value" should follow the standardization rule
+- Do not skip any values
+- Return only the JSON object, nothing else`;
+
+  if (provider === 'gemini') {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            responseMimeType: "application/json",
+          },
+        }),
+        signal,
+      }
+    );
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Gemini API error: ${err}`);
+    }
+    const data = await response.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    return parseJsonResponse(text);
+  } else if (provider === 'openai') {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON." },
+          { role: "user", content: prompt }
+        ],
+        response_format: { type: "json_object" },
+      }),
+      signal,
+    });
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`OpenAI API error: ${err}`);
+    }
+    const data = await response.json();
+    const text = data.choices[0]?.message?.content || "";
+    return parseJsonResponse(text);
+  } else if (provider === 'groq') {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON." },
+          { role: "user", content: prompt }
+        ],
+        response_format: { type: "json_object" },
+      }),
+      signal,
+    });
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Groq API error: ${err}`);
+    }
+    const data = await response.json();
+    const text = data.choices[0]?.message?.content || "";
+    return parseJsonResponse(text);
+  } else if (provider === 'anthropic') {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-3-5-haiku-20241022",
+        max_tokens: 4096,
+        messages: [{ role: "user", content: prompt }],
+      }),
+      signal,
+    });
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Anthropic API error: ${err}`);
+    }
+    const data = await response.json();
+    const text = data.content[0]?.text || "";
+    return parseJsonResponse(text);
+  } else {
+    throw new Error(`Unknown provider: ${provider}`);
+  }
+}
 
 function generateId() {
   return Math.random().toString(36).substring(2, 9);
@@ -46,6 +196,7 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
       status: 'idle',
       error: null,
       mappings: null,
+      preset: 'custom',
     };
     setRules((prev) => [...prev, newRule]);
   }
@@ -65,6 +216,22 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
           updated.error = null;
           updated.status = 'idle';
         }
+        if (updates.preset !== undefined) {
+          if (updates.preset === 'translate_es') {
+            updated.instruction = 'Translate the content of this column into Spanish';
+          } else if (updates.preset === 'sentiment') {
+            updated.instruction = 'Analyze the sentiment of this text. Categorize it as Positive, Neutral, or Negative.';
+          } else if (updates.preset === 'summarize') {
+            updated.instruction = 'Provide a concise summary of this text in 10 words or less.';
+          } else if (updates.preset === 'intro') {
+            updated.instruction = 'Generate a highly personalized, brief cold email intro line based on this value.';
+          } else if (updates.preset === 'custom') {
+            updated.instruction = '';
+          }
+          updated.mappings = null;
+          updated.error = null;
+          updated.status = 'idle';
+        }
         if (updates.instruction !== undefined) {
           updated.mappings = null;
           updated.error = null;
@@ -75,43 +242,107 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
     );
   }
 
-  async function runStandardizationForRule(rule: StandardizationRule): Promise<StandardizationRule> {
+  async function runStandardizationForRule(
+    rule: StandardizationRule,
+    onProgress?: (msg: string) => void
+  ): Promise<StandardizationRule> {
     if (!rule.selectedCol || !rule.instruction.trim() || !apiKeys[provider]) {
       return { ...rule, status: 'error', error: 'Missing column, instruction, or API key' };
     }
 
     const uniqueVals = getUniqueValues(data, rule.selectedCol);
+    const BATCH_SIZE = 30;
+    const batches: string[][] = [];
+    for (let i = 0; i < uniqueVals.length; i += BATCH_SIZE) {
+      batches.push(uniqueVals.slice(i, i + BATCH_SIZE));
+    }
+
+    const allMappings: StandardizationPair[] = [];
 
     try {
-      const response = await fetch(
-        `${SUPABASE_URL}/functions/v1/ai-standardize`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-            'apikey': SUPABASE_ANON_KEY,
-          },
-          body: JSON.stringify({
-            provider,
-            api_key: apiKeys[provider],
-            unique_values: uniqueVals,
-            column_name: rule.selectedCol,
-            instruction: rule.instruction.trim(),
-          }),
-        }
-      );
+      const config = getSupabaseConfig();
+      const finalUrl = config.url || SUPABASE_URL;
+      const finalAnonKey = config.anonKey || SUPABASE_ANON_KEY;
+      const hasSupabaseUrl = finalUrl && finalUrl.includes('http') && !finalUrl.includes('your-project');
 
-      if (!response.ok) {
-        const err = await response.text();
-        throw new Error(err || `Request failed with status ${response.status}`);
+      for (let b = 0; b < batches.length; b++) {
+        const chunk = batches[b];
+        if (onProgress) {
+          onProgress(`Batch ${b + 1} of ${batches.length}...`);
+        }
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+        try {
+          let resultData: { mappings: StandardizationPair[] };
+
+          if (hasSupabaseUrl) {
+            try {
+              const response = await fetch(
+                `${finalUrl}/functions/v1/ai-standardize`,
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${finalAnonKey}`,
+                    'apikey': finalAnonKey,
+                  },
+                  body: JSON.stringify({
+                    provider,
+                    api_key: apiKeys[provider],
+                    unique_values: chunk,
+                    column_name: rule.selectedCol,
+                    instruction: rule.instruction.trim(),
+                  }),
+                  signal: controller.signal,
+                }
+              );
+
+              if (!response.ok) {
+                const err = await response.text();
+                throw new Error(err || `Request failed with status ${response.status}`);
+              }
+
+              resultData = await response.json();
+            } catch (supabaseErr) {
+              console.warn("Supabase function request failed. Trying direct client-side fallback connection...", supabaseErr);
+              resultData = await callAIDirectly(
+                provider,
+                apiKeys[provider],
+                rule.selectedCol,
+                rule.instruction.trim(),
+                chunk,
+                controller.signal
+              );
+            }
+          } else {
+            // Bypass Supabase and call directly
+            resultData = await callAIDirectly(
+              provider,
+              apiKeys[provider],
+              rule.selectedCol,
+              rule.instruction.trim(),
+              chunk,
+              controller.signal
+            );
+          }
+
+          const mappings: StandardizationPair[] = resultData.mappings || [];
+          allMappings.push(...mappings);
+        } catch (e: unknown) {
+          if (e instanceof Error && e.name === 'AbortError') {
+            throw new Error(`Batch ${b + 1} request timed out after 30 seconds.`);
+          }
+          throw e;
+        } finally {
+          clearTimeout(timeoutId);
+        }
       }
 
-      const result = await response.json();
-      const mappings: StandardizationPair[] = result.mappings;
-      return { ...rule, status: 'success', mappings, error: null };
+      return { ...rule, status: 'success', mappings: allMappings, error: null, progressMsg: undefined };
     } catch (e: unknown) {
-      return { ...rule, status: 'error', error: e instanceof Error ? e.message : 'Unknown error' };
+      return { ...rule, status: 'error', error: e instanceof Error ? e.message : 'Unknown error', progressMsg: undefined };
     }
   }
 
@@ -119,11 +350,17 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
     if (rules.length === 0) return;
     setRunning(true);
 
-    const runningRules = rules.map((r) => ({ ...r, status: 'loading' as const, error: null }));
+    const runningRules = rules.map((r) => ({ ...r, status: 'loading' as const, error: null, progressMsg: 'Starting...' }));
     setRules(runningRules);
 
     const results = await Promise.all(
-      runningRules.map((r) => runStandardizationForRule(r))
+      runningRules.map((r) =>
+        runStandardizationForRule(r, (msg) => {
+          setRules((prev) =>
+            prev.map((item) => (item.id === r.id ? { ...item, progressMsg: msg } : item))
+          );
+        })
+      )
     );
 
     setRules(results);
@@ -182,18 +419,18 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
     .map((r) => r.newColName.trim() || `${r.selectedCol}_Cleaned`);
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+    <div className="bg-white/80 backdrop-blur-md rounded-2xl border border-slate-200/60 border-l-4 border-l-violet-500 shadow-sm overflow-hidden hover:shadow-md transition-all duration-300">
       <button
         onClick={() => setExpanded((p) => !p)}
-        className="w-full flex items-center justify-between px-6 py-5 hover:bg-slate-50 transition-colors"
+        className="w-full flex items-center justify-between px-6 py-5 hover:bg-slate-50/40 transition-colors"
       >
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-violet-100 rounded-lg flex items-center justify-center">
+          <div className="w-8 h-8 bg-violet-100 rounded-lg flex items-center justify-center shadow-sm">
             <Sparkles size={16} className="text-violet-600" />
           </div>
           <div className="text-left">
-            <h2 className="font-semibold text-slate-800 text-sm">Module 3: AI Taxonomy Standardization</h2>
-            <p className="text-xs text-slate-500 mt-0.5">AI-powered contextual normalization with multi-provider support</p>
+            <h2 className="font-bold text-slate-800 text-sm">Module 3: AI Taxonomy Standardization</h2>
+            <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">AI-powered contextual normalization with multi-provider support</p>
           </div>
         </div>
         {expanded ? <ChevronUp size={18} className="text-slate-400" /> : <ChevronDown size={18} className="text-slate-400" />}
@@ -203,16 +440,16 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
         <div className="px-6 pb-6 space-y-5 border-t border-slate-100 pt-5">
           {/* Provider Selection */}
           <div className="space-y-3">
-            <label className="block text-xs font-semibold text-slate-600">AI Provider</label>
+            <label className="block text-xs font-semibold text-slate-605">AI Provider</label>
             <div className="flex flex-wrap gap-2">
               {(['groq', 'openai', 'anthropic', 'gemini'] as AIProvider[]).map((p) => (
                 <button
                   key={p}
                   onClick={() => setProvider(p)}
-                  className={`px-4 py-2 text-xs font-semibold rounded-lg border transition-all ${
+                  className={`px-4 py-2 text-xs font-semibold rounded-xl border transition-all ${
                     provider === p
-                      ? 'border-violet-500 bg-violet-50 text-violet-700'
-                      : 'border-slate-200 bg-white text-slate-600 hover:border-violet-300'
+                      ? 'border-violet-500 bg-violet-50/50 text-violet-700 shadow-sm shadow-violet-500/5'
+                      : 'border-slate-200 bg-white text-slate-650 hover:border-violet-300'
                   }`}
                 >
                   {p.charAt(0).toUpperCase() + p.slice(1)}
@@ -255,7 +492,7 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                     <div>
                       <label className="block text-xs font-semibold text-slate-600 mb-1">Source Column</label>
                       <select
@@ -276,6 +513,21 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
                     </div>
 
                     <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">AI Task Preset</label>
+                      <select
+                        value={rule.preset || 'custom'}
+                        onChange={(e) => updateRule(rule.id, { preset: e.target.value })}
+                        className="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-xs text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+                      >
+                        <option value="custom">Custom Instruction</option>
+                        <option value="translate_es">Translate to Spanish</option>
+                        <option value="sentiment">Sentiment Analysis</option>
+                        <option value="summarize">Text Summarization</option>
+                        <option value="intro">Generate Cold Intro</option>
+                      </select>
+                    </div>
+
+                    <div>
                       <label className="block text-xs font-semibold text-slate-600 mb-1">New Column Name</label>
                       <input
                         type="text"
@@ -290,7 +542,7 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
                       {rule.status === 'loading' && (
                         <div className="flex items-center gap-1.5 text-xs text-violet-600">
                           <Loader2 size={12} className="animate-spin" />
-                          Processing...
+                          {rule.progressMsg || 'Processing...'}
                         </div>
                       )}
                       {rule.status === 'success' && (

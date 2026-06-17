@@ -46,11 +46,26 @@ Rules:
 - Return only the JSON object, nothing else`;
 }
 
+async function fetchWithTimeout(url: string, options: RequestInit & { timeout?: number }): Promise<Response> {
+  const { timeout = 25000, ...fetchOptions } = options;
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await fetch(url, {
+      ...fetchOptions,
+      signal: controller.signal
+    });
+    return response;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 async function callGroq(apiKey: string, prompt: string): Promise<StandardizationResponse> {
   const Groq = (await import("npm:groq-sdk@0.9.0")).default;
   const groq = new Groq({ apiKey });
 
-  const completion = await groq.chat.completions.create({
+  const completionPromise = groq.chat.completions.create({
     model: "llama-3.3-70b-versatile",
     messages: [
       { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON arrays." },
@@ -59,12 +74,17 @@ async function callGroq(apiKey: string, prompt: string): Promise<Standardization
     response_format: { type: "json_object" },
   });
 
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error("Groq API request timed out after 25 seconds")), 25000)
+  );
+
+  const completion = await Promise.race([completionPromise, timeoutPromise]);
   const text = completion.choices[0]?.message?.content || "";
   return parseJsonResponse(text);
 }
 
 async function callOpenAI(apiKey: string, prompt: string): Promise<StandardizationResponse> {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+  const response = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -91,7 +111,7 @@ async function callOpenAI(apiKey: string, prompt: string): Promise<Standardizati
 }
 
 async function callAnthropic(apiKey: string, prompt: string): Promise<StandardizationResponse> {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -118,7 +138,7 @@ async function callAnthropic(apiKey: string, prompt: string): Promise<Standardiz
 }
 
 async function callGemini(apiKey: string, prompt: string): Promise<StandardizationResponse> {
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
     {
       method: "POST",
