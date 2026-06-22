@@ -38,7 +38,12 @@ export function getUniqueValues(rows: DataRow[], col: string): string[] {
   const vals = new Set<string>();
   for (const row of rows) {
     const v = row[col];
-    if (v !== null && v !== undefined) vals.add(String(v));
+    if (v !== null && v !== undefined) {
+      const s = String(v).trim();
+      if (s !== '') {
+        vals.add(s);
+      }
+    }
   }
   return Array.from(vals);
 }
