@@ -49,11 +49,76 @@ export function applyColumnMapping(
   newCol: string,
   mapping: Record<string, string>
 ): DataRow[] {
+  // 1. Build lookup of normalized keys
+  const normalizedMapping: Record<string, string> = {};
+  for (const [key, val] of Object.entries(mapping)) {
+    // Exact mapping key
+    normalizedMapping[key] = val;
+    
+    // Lowercase and trimmed mapping key
+    const lowKey = key.trim().toLowerCase();
+    if (!(lowKey in normalizedMapping)) {
+      normalizedMapping[lowKey] = val;
+    }
+    
+    // Canonicalized mapping key (alphanumeric and converting ampersands)
+    const canonKey = lowKey.replace(/&/g, 'and').replace(/[^a-z0-9]/g, '');
+    if (!(canonKey in normalizedMapping)) {
+      normalizedMapping[canonKey] = val;
+    }
+  }
+
+  // Pre-sort keys by length descending for substring lookup to prefer more specific matches
+  const sortedKeys = Object.keys(mapping).sort((a, b) => b.length - a.length);
+
   return rows.map((row) => {
     const original = String(row[sourceCol] ?? '');
+    
+    // Check 1: Exact match
+    if (original in normalizedMapping) {
+      return {
+        ...row,
+        [newCol]: normalizedMapping[original],
+      };
+    }
+    
+    // Check 2: Lowercase and trimmed match
+    const lowOriginal = original.trim().toLowerCase();
+    if (lowOriginal in normalizedMapping) {
+      return {
+        ...row,
+        [newCol]: normalizedMapping[lowOriginal],
+      };
+    }
+    
+    // Check 3: Canonicalized match
+    const canonOriginal = lowOriginal.replace(/&/g, 'and').replace(/[^a-z0-9]/g, '');
+    if (canonOriginal in normalizedMapping) {
+      return {
+        ...row,
+        [newCol]: normalizedMapping[canonOriginal],
+      };
+    }
+    
+    // Check 4: Substring/fuzzy match (longest keys first, ignoring case/spacing/punctuation)
+    for (const key of sortedKeys) {
+      const kLow = key.trim().toLowerCase();
+      if (
+        kLow.length > 3 &&
+        lowOriginal.length > 3 &&
+        (lowOriginal.includes(kLow) || kLow.includes(lowOriginal))
+      ) {
+        return {
+          ...row,
+          [newCol]: mapping[key],
+        };
+      }
+    }
+
+    // Default fallback
     return {
       ...row,
-      [newCol]: mapping[original] ?? original,
+      [newCol]: original,
     };
   });
 }

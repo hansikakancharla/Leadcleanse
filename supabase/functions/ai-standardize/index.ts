@@ -68,7 +68,7 @@ async function callGroq(apiKey: string, prompt: string): Promise<Standardization
   const completionPromise = groq.chat.completions.create({
     model: "llama-3.3-70b-versatile",
     messages: [
-      { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON arrays." },
+      { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON format." },
       { role: "user", content: prompt }
     ],
     response_format: { type: "json_object" },
@@ -93,7 +93,7 @@ async function callOpenAI(apiKey: string, prompt: string): Promise<Standardizati
     body: JSON.stringify({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON arrays." },
+        { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON format." },
         { role: "user", content: prompt }
       ],
       response_format: { type: "json_object" },
@@ -165,20 +165,30 @@ async function callGemini(apiKey: string, prompt: string): Promise<Standardizati
 }
 
 function parseJsonResponse(text: string): StandardizationResponse {
-  let parsed: StandardizationResponse;
+  let parsed: any;
   try {
     parsed = JSON.parse(text);
   } catch {
-    const match = text.match(/\{[\s\S]*\}/);
+    const match = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
     if (!match) throw new Error("Could not parse response as JSON");
     parsed = JSON.parse(match[0]);
   }
 
-  if (!parsed.mappings || !Array.isArray(parsed.mappings)) {
+  if (Array.isArray(parsed)) {
+    return { mappings: parsed };
+  }
+
+  if (!parsed || !parsed.mappings || !Array.isArray(parsed.mappings)) {
+    if (parsed && typeof parsed === 'object') {
+      const possibleArray = Object.values(parsed).find(val => Array.isArray(val));
+      if (possibleArray) {
+        return { mappings: possibleArray as StandardizationPair[] };
+      }
+    }
     throw new Error("Invalid response structure");
   }
 
-  return parsed;
+  return parsed as StandardizationResponse;
 }
 
 Deno.serve(async (req: Request) => {

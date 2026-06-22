@@ -30,16 +30,26 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 function parseJsonResponse(text: string): { mappings: StandardizationPair[] } {
-  let parsed: { mappings?: StandardizationPair[] };
+  let parsed: any;
   try {
-    parsed = JSON.parse(text) as { mappings?: StandardizationPair[] };
+    parsed = JSON.parse(text);
   } catch {
-    const match = text.match(/\{[\s\S]*\}/);
+    const match = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
     if (!match) throw new Error("Could not parse response as JSON");
-    parsed = JSON.parse(match[0]) as { mappings?: StandardizationPair[] };
+    parsed = JSON.parse(match[0]);
+  }
+
+  if (Array.isArray(parsed)) {
+    return { mappings: parsed };
   }
 
   if (!parsed || !parsed.mappings || !Array.isArray(parsed.mappings)) {
+    if (parsed && typeof parsed === 'object') {
+      const possibleArray = Object.values(parsed).find(val => Array.isArray(val));
+      if (possibleArray) {
+        return { mappings: possibleArray as StandardizationPair[] };
+      }
+    }
     throw new Error("Invalid response structure: 'mappings' array not found in JSON response");
   }
 
@@ -269,6 +279,11 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
         const chunk = batches[b];
         if (onProgress) {
           onProgress(`Batch ${b + 1} of ${batches.length}...`);
+        }
+
+        // Delay between batches to avoid rate limit issues
+        if (b > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
         }
 
         const controller = new AbortController();
