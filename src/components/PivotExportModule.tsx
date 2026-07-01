@@ -3,6 +3,7 @@ import { BarChart3, Download, ChevronDown, ChevronUp, CheckSquare, Square, PieCh
 import type { DataRow } from '../types';
 import { pivotData, exportToCSV } from '../utils/dataUtils';
 import { logExport } from '../utils/db';
+import SearchableSelect from './SearchableSelect';
 
 interface SVGChartProps {
   data: DataRow[];
@@ -470,30 +471,36 @@ export default function PivotExportModule({ data, columns, fileName = '', userna
               </div>
             </div>
 
-            <div>
+             <div>
               <label className="block text-xs font-semibold text-slate-600 mb-1.5">Aggregation</label>
-              <select
+              <SearchableSelect
                 value={aggFunc}
-                onChange={(e) => setAggFunc(e.target.value as 'count' | 'sum' | 'avg')}
-                className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-teal-500/30"
-              >
-                <option value="count">Count (rows)</option>
-                <option value="sum">Sum</option>
-                <option value="avg">Average</option>
-              </select>
+                onChange={(val) => setAggFunc(val as 'count' | 'sum' | 'avg')}
+                options={[
+                  { value: 'count', label: 'Count (rows)' },
+                  { value: 'sum', label: 'Sum' },
+                  { value: 'avg', label: 'Average' }
+                ]}
+                buttonClass="px-3 py-2.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-teal-500/30"
+                activeClass="bg-teal-50 text-teal-800"
+                checkColorClass="text-teal-650"
+              />
             </div>
 
             {aggFunc !== 'count' && (
               <div>
                 <label className="block text-xs font-semibold text-slate-600 mb-1.5">Numeric Column</label>
-                <select
+                <SearchableSelect
                   value={valueCol}
-                  onChange={(e) => setValueCol(e.target.value)}
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-teal-500/30"
-                >
-                  <option value="">Select column...</option>
-                  {numericCols.map((c) => <option key={c} value={c}>{c}</option>)}
-                </select>
+                  onChange={(val) => setValueCol(val)}
+                  options={[
+                    { value: '', label: 'Select column...' },
+                    ...numericCols.map((c) => ({ value: c, label: c }))
+                  ]}
+                  buttonClass="px-3 py-2.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-teal-500/30"
+                  activeClass="bg-teal-50 text-teal-800"
+                  checkColorClass="text-teal-650"
+                />
               </div>
             )}
           </div>

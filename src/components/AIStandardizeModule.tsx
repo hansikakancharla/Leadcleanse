@@ -4,6 +4,7 @@ import type { DataRow, StandardizationPair } from '../types';
 import { getUniqueValues, applyColumnMapping } from '../utils/dataUtils';
 import DataGrid from './DataGrid';
 import { getSupabaseConfig } from '../utils/db';
+import SearchableSelect from './SearchableSelect';
 
 export type AIProvider = 'groq' | 'openai' | 'anthropic' | 'gemini';
 
@@ -69,8 +70,8 @@ async function callAIDirectly(
 Column Name: "${columnName}"
 Standardization Rule: ${instruction}
 
-Here are the unique raw values to standardize:
-${uniqueValues.map((v, i) => `${i + 1}. "${v}"`).join("\n")}
+Here are the unique raw values to standardize (as a JSON array of strings):
+${JSON.stringify(uniqueValues)}
 
 Return a JSON object with this exact structure:
 {
@@ -81,9 +82,10 @@ Return a JSON object with this exact structure:
 }
 
 Rules:
-- Every input value must appear exactly once in the mappings as "original_value"
-- "original_value" must be EXACTLY the raw value (case-sensitive, character-for-character match)
-- "standardized_value" should follow the standardization rule
+- Every input value in the unique raw values array must appear exactly once in the mappings as "original_value"
+- "original_value" must be EXACTLY the raw value from the array (case-sensitive, character-for-character match)
+- "standardized_value" must contain ONLY the cleaned/transformed result. Do not include any prefix, suffix, quotes, numbering, explanation, notes, markdown formatting, or conversational commentary.
+- If a raw value does not match the criteria of the standardization rule (for example, standardizing to 'C level and VP level' when the value is 'Developer' or 'Manager'), map it to its original value or a sensible neutral classification like 'Other'/'N/A'. Do NOT force a value into a category if it does not fit the criteria of the rule.
 - Do not skip any values
 - Return only the JSON object, nothing else`;
 
@@ -121,7 +123,7 @@ Rules:
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON." },
+          { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON format. Follow all instructions and do not include conversational preambles or notes." },
           { role: "user", content: prompt }
         ],
         response_format: { type: "json_object" },
@@ -145,7 +147,7 @@ Rules:
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
         messages: [
-          { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON." },
+          { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON format. Follow all instructions and do not include conversational preambles or notes." },
           { role: "user", content: prompt }
         ],
         response_format: { type: "json_object" },
@@ -243,6 +245,7 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
           updated.status = 'idle';
         }
         if (updates.instruction !== undefined) {
+          updated.preset = 'custom';
           updated.mappings = null;
           updated.error = null;
           updated.status = 'idle';
@@ -510,16 +513,17 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                     <div>
                       <label className="block text-xs font-semibold text-slate-600 mb-1">Source Column</label>
-                      <select
+                      <SearchableSelect
                         value={rule.selectedCol}
-                        onChange={(e) => updateRule(rule.id, { selectedCol: e.target.value })}
-                        className="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-xs text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-violet-500/30"
-                      >
-                        <option value="">Select...</option>
-                        {columns.map((c) => (
-                          <option key={c} value={c}>{c}</option>
-                        ))}
-                      </select>
+                        onChange={(val) => updateRule(rule.id, { selectedCol: val })}
+                        options={[
+                          { value: '', label: 'Select...' },
+                          ...columns.map((c) => ({ value: c, label: c }))
+                        ]}
+                        buttonClass="px-2.5 py-2 text-xs border border-slate-200 rounded-lg text-slate-700 focus:ring-violet-500/30"
+                        activeClass="bg-violet-50 text-violet-700"
+                        checkColorClass="text-violet-600"
+                      />
                       {rule.selectedCol && (
                         <p className="text-xs text-slate-500 mt-1">
                           <span className="font-semibold text-blue-600">{uniqueCounts[rule.selectedCol] || 0}</span> unique values
@@ -529,17 +533,20 @@ export default function AIStandardizeModule({ data, columns, onApply, apiKeys }:
 
                     <div>
                       <label className="block text-xs font-semibold text-slate-600 mb-1">AI Task Preset</label>
-                      <select
+                      <SearchableSelect
                         value={rule.preset || 'custom'}
-                        onChange={(e) => updateRule(rule.id, { preset: e.target.value })}
-                        className="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-xs text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-violet-500/30"
-                      >
-                        <option value="custom">Custom Instruction</option>
-                        <option value="translate_es">Translate to Spanish</option>
-                        <option value="sentiment">Sentiment Analysis</option>
-                        <option value="summarize">Text Summarization</option>
-                        <option value="intro">Generate Cold Intro</option>
-                      </select>
+                        onChange={(val) => updateRule(rule.id, { preset: val })}
+                        options={[
+                          { value: 'custom', label: 'Custom Instruction' },
+                          { value: 'translate_es', label: 'Translate to Spanish' },
+                          { value: 'sentiment', label: 'Sentiment Analysis' },
+                          { value: 'summarize', label: 'Text Summarization' },
+                          { value: 'intro', label: 'Generate Cold Intro' }
+                        ]}
+                        buttonClass="px-2.5 py-2 text-xs border border-slate-200 rounded-lg text-slate-700 focus:ring-violet-500/30"
+                        activeClass="bg-violet-50 text-violet-700"
+                        checkColorClass="text-violet-600"
+                      />
                     </div>
 
                     <div>

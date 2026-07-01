@@ -27,8 +27,8 @@ function buildPrompt(column_name: string, instruction: string, unique_values: st
 Column Name: "${column_name}"
 Standardization Rule: ${instruction}
 
-Here are the unique raw values to standardize:
-${unique_values.map((v, i) => `${i + 1}. "${v}"`).join("\n")}
+Here are the unique raw values to standardize (as a JSON array of strings):
+${JSON.stringify(unique_values)}
 
 Return a JSON object with this exact structure:
 {
@@ -39,9 +39,10 @@ Return a JSON object with this exact structure:
 }
 
 Rules:
-- Every input value must appear exactly once in the mappings as "original_value"
-- "original_value" must be EXACTLY the raw value (case-sensitive, character-for-character match)
-- "standardized_value" should follow the standardization rule
+- Every input value in the unique raw values array must appear exactly once in the mappings as "original_value"
+- "original_value" must be EXACTLY the raw value from the array (case-sensitive, character-for-character match)
+- "standardized_value" must contain ONLY the cleaned/transformed result. Do not include any prefix, suffix, quotes, numbering, explanation, notes, markdown formatting, or conversational commentary.
+- If a raw value does not match the criteria of the standardization rule (for example, standardizing to 'C level and VP level' when the value is 'Developer' or 'Manager'), map it to its original value or a sensible neutral classification like 'Other'/'N/A'. Do NOT force a value into a category if it does not fit the criteria of the rule.
 - Do not skip any values
 - Return only the JSON object, nothing else`;
 }
@@ -68,7 +69,7 @@ async function callGroq(apiKey: string, prompt: string): Promise<Standardization
   const completionPromise = groq.chat.completions.create({
     model: "llama-3.3-70b-versatile",
     messages: [
-      { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON format." },
+      { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON format. Follow all instructions and do not include conversational preambles or notes." },
       { role: "user", content: prompt }
     ],
     response_format: { type: "json_object" },
@@ -93,7 +94,7 @@ async function callOpenAI(apiKey: string, prompt: string): Promise<Standardizati
     body: JSON.stringify({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON format." },
+        { role: "system", content: "You are a data cleansing assistant. Output data strictly in valid JSON format. Follow all instructions and do not include conversational preambles or notes." },
         { role: "user", content: prompt }
       ],
       response_format: { type: "json_object" },
