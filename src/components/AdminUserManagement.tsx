@@ -1,6 +1,6 @@
 import React from 'react';
 import { Shield, CheckCircle, XCircle, Clock, UserMinus, UserCheck } from 'lucide-react';
-import type { DummyUser } from '../utils/db';
+import { syncUserToDatabase, type DummyUser } from '../utils/db';
 
 interface AdminUserManagementProps {
   users: DummyUser[];
@@ -24,7 +24,9 @@ export default function AdminUserManagement({
 
     const updated = users.map((u) => {
       if (u.email.toLowerCase() === email.toLowerCase()) {
-        return { ...u, status };
+        const updatedUser = { ...u, status };
+        syncUserToDatabase(updatedUser);
+        return updatedUser;
       }
       return u;
     });

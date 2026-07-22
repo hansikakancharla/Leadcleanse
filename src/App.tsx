@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Database, Eye, EyeOff, Key, RefreshCw, ChevronDown, ChevronUp, CheckCircle, AlertCircle, Info, XCircle, LogOut, Clock } from 'lucide-react';
 import type { DataRow } from './types';
 import { parseFile } from './utils/fileParser';
@@ -9,7 +9,7 @@ import AIStandardizeModule, { type AIProvider } from './components/AIStandardize
 import PivotExportModule from './components/PivotExportModule';
 import DatabaseLog from './components/DatabaseLog';
 import AdminUserManagement from './components/AdminUserManagement';
-import { logAttachedFile, getSupabaseConfig, updateSupabaseConfig, DUMMY_USERS, type DummyUser } from './utils/db';
+import { logAttachedFile, getSupabaseConfig, updateSupabaseConfig, DUMMY_USERS, type DummyUser, syncUserToDatabase, getDatabaseUsers, getSupabaseClient } from './utils/db';
 
 const providerLabels: Record<AIProvider, string> = {
   groq: 'Groq',
@@ -112,6 +112,34 @@ export default function App() {
     ? `${currentUser.name} (${currentUser.company}) <${currentUser.email}>`
     : 'Guest User';
 
+  const isSupabaseConnected = !!getSupabaseClient();
+
+  useEffect(() => {
+    async function loadRemoteUsers() {
+      try {
+        const dbUsers = await getDatabaseUsers();
+        if (dbUsers && dbUsers.length > 0) {
+          setUsers((prev) => {
+            const merged = [...prev];
+            for (const dUser of dbUsers) {
+              const idx = merged.findIndex((u) => u.email.toLowerCase() === dUser.email.toLowerCase());
+              if (idx >= 0) {
+                merged[idx] = { ...merged[idx], ...dUser };
+              } else {
+                merged.push(dUser);
+              }
+            }
+            localStorage.setItem('datacleanse_users', JSON.stringify(merged));
+            return merged;
+          });
+        }
+      } catch (e) {
+        console.error('Failed to load database users', e);
+      }
+    }
+    loadRemoteUsers();
+  }, []);
+
   const showToast = useCallback((message: string, type: Toast['type'] = 'success') => {
     const id = Math.random().toString(36).substring(2, 9);
     setToasts((prev) => [...prev, { id, message, type }]);
@@ -181,30 +209,65 @@ export default function App() {
     showToast(`AI aligned taxonomy completed! Appended new columns: ${newCols.join(', ')}`, 'success');
   }
 
-  function handleLogin(e: React.FormEvent) {
+  async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
-    const match = users.find(
+    setLoginError(null);
+    const cleanInput = emailInput.trim().toLowerCase();
+    const cleanPass = passwordInput.trim();
+
+    let currentUsersList = [...users];
+
+    let match = currentUsersList.find(
       (u) =>
-        (u.email.toLowerCase() === emailInput.trim().toLowerCase() ||
-         u.name.toLowerCase() === emailInput.trim().toLowerCase()) &&
-        u.passwordHash === passwordInput.trim()
+        (u.email.toLowerCase() === cleanInput ||
+         u.name.toLowerCase() === cleanInput) &&
+        u.passwordHash === cleanPass
     );
-    if (match) {
-      const status = match.status || 'approved';
-      if (status === 'pending') {
-        setLoginError('Your access request is pending administrator approval.');
-        showToast('Access pending approval', 'warning');
-        return;
+
+    // If not found in current local state, attempt to fetch fresh profiles from database (e.g. registered on another machine)
+    if (!match) {
+      try {
+        const remoteUsers = await getDatabaseUsers();
+        if (remoteUsers && remoteUsers.length > 0) {
+          const merged = [...currentUsersList];
+          for (const ru of remoteUsers) {
+            const idx = merged.findIndex((m) => m.email.toLowerCase() === ru.email.toLowerCase());
+            if (idx >= 0) {
+              // Update existing user with fresh details from database
+              merged[idx] = { ...merged[idx], ...ru };
+            } else {
+              // Add new user from database
+              merged.push(ru);
+            }
+          }
+          setUsers(merged);
+          localStorage.setItem('datacleanse_users', JSON.stringify(merged));
+          currentUsersList = merged;
+
+          match = currentUsersList.find(
+            (u) =>
+              (u.email.toLowerCase() === cleanInput ||
+               u.name.toLowerCase() === cleanInput) &&
+              u.passwordHash === cleanPass
+          );
+        }
+      } catch (err) {
+        console.error('Failed to fetch remote database users on login', err);
       }
-      if (status === 'rejected') {
+    }
+
+    if (match) {
+      if (match.status === 'rejected') {
         setLoginError('Your access request has been rejected. Please contact an administrator.');
         showToast('Access request rejected', 'error');
         return;
       }
-      setCurrentUser(match);
-      localStorage.setItem('datacleanse_current_user', JSON.stringify(match));
+
+      const activeUser: DummyUser = { ...match, status: 'approved' };
+      setCurrentUser(activeUser);
+      localStorage.setItem('datacleanse_current_user', JSON.stringify(activeUser));
       setLoginError(null);
-      showToast(`Welcome back, ${match.name}!`, 'success');
+      showToast(`Welcome back, ${activeUser.name}!`, 'success');
     } else {
       setLoginError('Invalid username/email or password.');
       showToast('Authentication failed', 'error');
@@ -243,13 +306,20 @@ export default function App() {
       passwordHash: password,
       company,
       role,
-      status: 'pending',
+      status: 'approved',
       isAdmin: false,
     };
 
     const updatedUsers = [...users, newUser];
     setUsers(updatedUsers);
     localStorage.setItem('datacleanse_users', JSON.stringify(updatedUsers));
+
+    // Asynchronously push user registration details to Supabase & IndexedDB database
+    syncUserToDatabase(newUser);
+
+    // Log the user in directly
+    setCurrentUser(newUser);
+    localStorage.setItem('datacleanse_current_user', JSON.stringify(newUser));
 
     // Clear form fields
     setSignupName('');
@@ -259,8 +329,7 @@ export default function App() {
     setSignupPassword('');
     setSignupConfirmPassword('');
 
-    setAuthState('signup_pending');
-    showToast('Access request submitted successfully!', 'success');
+    showToast(`Welcome, ${name}! Your account has been created and synced to the database.`, 'success');
   }
 
   function handleForgotPasswordSubmit(e: React.FormEvent) {
@@ -291,7 +360,9 @@ export default function App() {
 
     const updatedUsers = users.map((u) => {
       if (u.email.toLowerCase() === resetEmail.trim().toLowerCase()) {
-        return { ...u, passwordHash: newPassword };
+        const updatedUser = { ...u, passwordHash: newPassword };
+        syncUserToDatabase(updatedUser);
+        return updatedUser;
       }
       return u;
     });
@@ -346,6 +417,15 @@ export default function App() {
                 <h2 className="text-lg font-bold text-white">Sign In</h2>
                 <p className="text-xs text-slate-400">Access your secure auditing environment</p>
               </div>
+
+              {!isSupabaseConnected && (
+                <div className="flex items-start gap-2 bg-amber-950/40 border border-amber-500/30 rounded-xl px-3.5 py-2.5 text-[11px] text-amber-200">
+                  <Info size={14} className="mt-0.5 shrink-0 text-amber-400" />
+                  <span>
+                    Database Offline (Local fallback active). Accounts created here will not be shared across other devices. Ask your administrator to set up the Supabase URL and Anon Key.
+                  </span>
+                </div>
+              )}
 
               <form onSubmit={handleLogin} className="space-y-4">
                 <div>
@@ -406,7 +486,7 @@ export default function App() {
                     }}
                     className="font-bold text-teal-400 hover:text-teal-350 transition-colors"
                   >
-                    Request Access
+                    Create Account
                   </button>
                 </p>
               </div>
@@ -416,9 +496,18 @@ export default function App() {
           {authState === 'signup' && (
             <>
               <div className="space-y-1">
-                <h2 className="text-lg font-bold text-white">Request Access</h2>
-                <p className="text-xs text-slate-400">Register your account details for administrator review</p>
+                <h2 className="text-lg font-bold text-white">Create Account</h2>
+                <p className="text-xs text-slate-400">Register your account details to get instant access</p>
               </div>
+
+              {!isSupabaseConnected && (
+                <div className="flex items-start gap-2 bg-amber-950/40 border border-amber-500/30 rounded-xl px-3.5 py-2.5 text-[11px] text-amber-200">
+                  <Info size={14} className="mt-0.5 shrink-0 text-amber-400" />
+                  <span>
+                    Database Offline (Local fallback active). Accounts created here will not be shared across other devices. Ask your administrator to set up the Supabase URL and Anon Key.
+                  </span>
+                </div>
+              )}
 
               <form onSubmit={handleSignUp} className="space-y-4">
                 <div>
@@ -509,7 +598,7 @@ export default function App() {
                     type="submit"
                     className="flex-1 py-2.5 bg-gradient-to-r from-violet-600 to-teal-600 hover:from-violet-700 hover:to-teal-700 text-white font-bold rounded-xl text-sm shadow-lg active:scale-[0.98] transition-all"
                   >
-                    Submit Request
+                    Sign Up & Sign In
                   </button>
                 </div>
               </form>

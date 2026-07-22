@@ -124,6 +124,9 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('download_log')) {
         db.createObjectStore('download_log', { keyPath: 'id' });
       }
+      if (!db.objectStoreNames.contains('user_accounts')) {
+        db.createObjectStore('user_accounts', { keyPath: 'email' });
+      }
     };
   });
 }
@@ -639,4 +642,86 @@ export async function clearDatabaseHistory(): Promise<void> {
   } catch (e) {
     console.error('Failed to clear local IndexedDB', e);
   }
+}
+
+export async function syncUserToDatabase(user: DummyUser): Promise<void> {
+  const client = getSupabaseClient();
+  const userData = {
+    email: user.email.toLowerCase(),
+    name: user.name,
+    password_hash: user.passwordHash,
+    role: user.role,
+    company: user.company,
+    status: user.status || 'approved',
+    is_admin: !!user.isAdmin,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (client) {
+    try {
+      const { error } = await client
+        .from('users_profile')
+        .upsert(userData, { onConflict: 'email' });
+      if (error) {
+        console.error('Supabase user profile upsert error:', error);
+      }
+    } catch (e) {
+      console.error('Supabase user profile sync exception:', e);
+    }
+  }
+
+  // Also save in local IndexedDB store
+  try {
+    await putInStore('user_accounts', {
+      email: user.email.toLowerCase(),
+      name: user.name,
+      passwordHash: user.passwordHash,
+      role: user.role,
+      company: user.company,
+      status: user.status || 'approved',
+      isAdmin: !!user.isAdmin,
+    });
+  } catch (e) {
+    console.error('IndexedDB user accounts store error:', e);
+  }
+}
+
+export async function getDatabaseUsers(): Promise<DummyUser[]> {
+  const client = getSupabaseClient();
+  let dbUsers: DummyUser[] = [];
+
+  if (client) {
+    try {
+      const { data, error } = await client
+        .from('users_profile')
+        .select('email, name, password_hash, role, company, status, is_admin');
+      if (!error && data && data.length > 0) {
+        dbUsers = data.map((d: Record<string, unknown>) => ({
+          email: String(d.email || ''),
+          name: String(d.name || ''),
+          passwordHash: String(d.password_hash || ''),
+          role: String(d.role || ''),
+          company: String(d.company || ''),
+          status: (d.status as 'approved' | 'pending' | 'rejected') || 'approved',
+          isAdmin: Boolean(d.is_admin),
+        }));
+      }
+    } catch (e) {
+      console.error('Supabase get user profiles exception:', e);
+    }
+  }
+
+  // Fallback to IndexedDB local user accounts store if Supabase returned nothing
+  if (dbUsers.length === 0) {
+    try {
+      const localAccounts = await getAllFromStore<DummyUser>('user_accounts');
+      if (localAccounts && localAccounts.length > 0) {
+        dbUsers = localAccounts;
+      }
+    } catch (e) {
+      console.error('IndexedDB user accounts fetch error:', e);
+    }
+  }
+
+  return dbUsers;
 }
